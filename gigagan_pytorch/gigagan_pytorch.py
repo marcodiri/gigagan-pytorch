@@ -35,6 +35,8 @@ from numerize import numerize
 from accelerate import Accelerator, DistributedType
 from accelerate.utils import DistributedDataParallelKwargs
 
+import wandb
+
 # helpers
 
 def exists(val):
@@ -2127,7 +2129,8 @@ class GigaGAN(nn.Module):
         dl_iter: Iterable,
         grad_accum_every = 1,
         apply_gradient_penalty = False,
-        calc_multiscale_loss = True
+        calc_multiscale_loss = True,
+        should_log = False,
     ):
         total_divergence = 0.
         total_vision_aided_divergence = 0.
@@ -2366,6 +2369,14 @@ class GigaGAN(nn.Module):
         if self.need_vision_aided_discriminator:
             self.VD_opt.step()
 
+        if should_log:
+            wandb.log({
+                "discim_images": [wandb.Image(image) for image in images],
+                "discim_real_images": [wandb.Image(image) for image in real_images],
+                # rgb
+                "discrim_rgbs": [wandb.Image(rgb) for rgb in rgbs],
+            })
+
         return TrainDiscrLosses(
             total_divergence,
             total_multiscale_divergence,
@@ -2380,7 +2391,8 @@ class GigaGAN(nn.Module):
         batch_size = None,
         dl_iter: Optional[Iterable] = None,
         grad_accum_every = 1,
-        calc_multiscale_loss = True
+        calc_multiscale_loss = True,
+        should_log = False,
     ):
         total_divergence = 0.
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
@@ -2419,6 +2431,12 @@ class GigaGAN(nn.Module):
                 if self.need_contrastive_loss:
                     all_images.append(images)
                     all_texts.extend(maybe_text_kwargs['texts'])
+
+                if should_log:
+                    wandb.log({
+                        "gen_images": [wandb.Image(img) for img in images],
+                        "gen_rgbs": [wandb.Image(rgb) for rgb in rgbs],
+                    })
 
                 # discriminator
 
@@ -2567,6 +2585,7 @@ class GigaGAN(nn.Module):
         for _ in tqdm(range(steps), initial = self.steps.item()):
             steps = self.steps.item()
             is_first_step = steps == 1
+            should_log = is_first_step or divisible_by(steps, self.log_steps_every)
 
             apply_gradient_penalty = self.apply_gradient_penalty_every > 0 and divisible_by(steps, self.apply_gradient_penalty_every)
             calc_multiscale_loss =  self.calc_multiscale_loss_every > 0 and divisible_by(steps, self.calc_multiscale_loss_every)
@@ -2582,7 +2601,8 @@ class GigaGAN(nn.Module):
                 dl_iter = dl_iter,
                 grad_accum_every = grad_accum_every,
                 apply_gradient_penalty = apply_gradient_penalty,
-                calc_multiscale_loss = calc_multiscale_loss
+                calc_multiscale_loss = calc_multiscale_loss,
+                should_log = should_log
             )
 
             self.accelerator.wait_for_everyone()
@@ -2596,7 +2616,8 @@ class GigaGAN(nn.Module):
                 dl_iter = dl_iter,
                 batch_size = batch_size,
                 grad_accum_every = grad_accum_every,
-                calc_multiscale_loss = calc_multiscale_loss
+                calc_multiscale_loss = calc_multiscale_loss,
+                should_log = should_log
             )
 
             if exists(gp_loss):
@@ -2608,24 +2629,40 @@ class GigaGAN(nn.Module):
             if exists(multiscale_g_loss):
                 last_multiscale_g_loss = multiscale_g_loss
 
-            if is_first_step or divisible_by(steps, self.log_steps_every):
+            if should_log:
+                pass
 
-                losses = (
-                    ('G', g_loss),
-                    ('MSG', last_multiscale_g_loss),
-                    ('VG', vision_aided_g_loss),
-                    ('D', d_loss),
-                    ('MSD', last_multiscale_d_loss),
-                    ('VD', vision_aided_d_loss),
-                    ('GP', last_gp_loss),
-                    ('SSL', recon_loss),
-                    ('CL', contrastive_loss),
-                    ('MAL', matching_aware_loss)
-                )
+            losses = (
+                ('G', g_loss),
+                ('MSG', last_multiscale_g_loss),
+                ('VG', vision_aided_g_loss),
+                ('D', d_loss),
+                ('MSD', last_multiscale_d_loss),
+                ('VD', vision_aided_d_loss),
+                ('GP', last_gp_loss),
+                ('SSL', recon_loss),
+                ('CL', contrastive_loss),
+                ('MAL', matching_aware_loss)
+            )
 
-                losses_str = ' | '.join([f'{loss_name}: {loss:.2f}' for loss_name, loss in losses])
+            losses_str = ' | '.join([f'{loss_name}: {loss:.2f}' for loss_name, loss in losses])
 
-                self.print(losses_str)
+            self.print(losses_str)
+
+            log_dict = {
+                "G": g_loss,
+                "MSG": last_multiscale_g_loss,
+                'VG': vision_aided_g_loss,
+                "D": d_loss,
+                "MSD": last_multiscale_d_loss,
+                'VD': vision_aided_d_loss,
+                "GP": last_gp_loss,
+                "SSL": recon_loss,
+                'CL': contrastive_loss,
+                'MAL': matching_aware_loss
+            }
+
+            wandb.log(log_dict)
 
             self.accelerator.wait_for_everyone()
 

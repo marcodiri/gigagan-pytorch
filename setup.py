@@ -28,7 +28,8 @@ setup(
     'pillow',
     'torch>=1.6',
     'torchvision',
-    'tqdm'
+    'tqdm',
+    'wandb'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',
