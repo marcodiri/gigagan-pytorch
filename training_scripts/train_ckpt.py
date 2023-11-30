@@ -1,5 +1,8 @@
 import torch
+from PIL import Image
+import torch.nn.functional as F
 from torchvision.utils import save_image
+from torchvision.transforms import ToPILImage
 from gigagan_pytorch import (
     GigaGAN,
     ImageDataset
@@ -8,9 +11,11 @@ from gigagan_pytorch import (
 import wandb
 
 
-wandb.init(project="gigagan", job_type="flowers7000", save_code=True)
+torch.manual_seed(1)
 
-LOG_EVERY = 100
+wandb.init(project="gigagan", job_type="flowers100", save_code=True)
+
+LOG_EVERY = 50
 
 gan = GigaGAN(
     train_upsampler = True,     # set this to True
@@ -37,13 +42,25 @@ gan = GigaGAN(
         multiscale_input_resolutions = (128,),
         unconditional = True
     ),
+    learning_rate = 2e-5,
     amp = True,
     log_steps_every=LOG_EVERY,
-    save_and_sample_every = 20000
+    save_and_sample_every = 10000
 ).cuda()
 
+checkpoint = torch.load("gigagan-models/model-7_ds100_70k.ckpt")
+
+gan.G.load_state_dict(checkpoint['G'])
+gan.G_ema.load_state_dict(checkpoint['G_ema'])
+gan.D.load_state_dict(checkpoint['D'])
+gan.G_opt.load_state_dict(checkpoint['G_opt'])
+gan.D_opt.load_state_dict(checkpoint['D_opt'])
+gan.G_opt.scaler.load_state_dict(checkpoint['G_scaler'])
+gan.D_opt.scaler.load_state_dict(checkpoint['D_scaler'])
+gan.steps[0] = checkpoint['steps']
+
 dataset = ImageDataset(
-    folder = './ds',
+    folder = './ds100',
     exts = ['jpg', 'JPEG'],
     image_size = 256
 )

@@ -131,4 +131,4 @@ dmypy.json
 gigagan-models/
 gigagan-results/
 wandb/
-ds/
+ds*/

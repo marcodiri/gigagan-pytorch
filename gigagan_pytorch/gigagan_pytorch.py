@@ -37,6 +37,54 @@ from accelerate.utils import DistributedDataParallelKwargs
 
 import wandb
 
+
+def plot_grad_flow(
+    named_parameters,
+    output_path: Path,
+):
+    """Plots the gradients flowing through different layers in the net during training.
+    Can be used for checking for possible gradient vanishing / exploding problems.
+
+    Usage: Plug this function in Trainer class after loss.backwards() as
+    "plot_grad_flow(self.model.named_parameters())" to visualize the gradient flow"""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.lines import Line2D
+
+    ave_grads = []
+    max_grads = []
+    layers = []
+    for n, p in named_parameters:
+        if (p.requires_grad) and (p.grad is not None) and ("bias" not in n):
+            layers.append(n)
+            ave_grads.append(p.grad.detach().cpu().abs().mean())
+            max_grads.append(p.grad.detach().cpu().abs().max())
+    fig = plt.figure()
+    fig.set_figwidth(20)
+    plt.bar(np.arange(len(max_grads)), max_grads, alpha=0.1, lw=1, color="c")
+    plt.bar(np.arange(len(max_grads)), ave_grads, alpha=0.1, lw=1, color="b")
+    plt.hlines(0, 0, len(ave_grads) + 1, lw=2, color="k")
+    plt.xticks(range(0, len(ave_grads), 1), layers, rotation="vertical")
+    plt.xlim(left=0, right=len(ave_grads))
+    plt.ylim(bottom=-0.001, top=0.02)  # zoom in on the lower gradient regions
+    plt.xlabel("Layers")
+    plt.ylabel("average gradient")
+    plt.title("Gradient flow")
+    plt.grid(True)
+    plt.legend(
+        [
+            Line2D([0], [0], color="c", lw=4),
+            Line2D([0], [0], color="b", lw=4),
+            Line2D([0], [0], color="k", lw=4),
+        ],
+        ["max-gradient", "mean-gradient", "zero-gradient"],
+    )
+    plt.tight_layout()
+    # output_path.parent.mkdir(parents=True, exist_ok=True)
+    # plt.savefig(output_path)
+    wandb.log({f"grad_flow_{output_path}": wandb.Image(fig)})
+    plt.close()
+
 # helpers
 
 def exists(val):
@@ -1789,9 +1837,12 @@ class GigaGAN(nn.Module):
         accelerate_kwargs: dict = {},
         find_unused_parameters = True,
         amp = False,
-        mixed_precision_type = 'fp16'
+        mixed_precision_type = 'fp16',
+        should_plot_grad_flow = False
     ):
         super().__init__()
+
+        self.should_plot_grad_flow = should_plot_grad_flow
 
         # create accelerator
 
@@ -2131,6 +2182,7 @@ class GigaGAN(nn.Module):
         apply_gradient_penalty = False,
         calc_multiscale_loss = True,
         should_log = False,
+        should_plot_grad_flow = False
     ):
         total_divergence = 0.
         total_vision_aided_divergence = 0.
@@ -2314,6 +2366,8 @@ class GigaGAN(nn.Module):
             # backwards
 
             self.accelerator.backward(total_loss / grad_accum_every)
+            if should_log and should_plot_grad_flow:
+                plot_grad_flow(self.D.named_parameters(), "gigagan-results/discr_grad_flow")
 
 
         # matching awareness loss
@@ -2371,8 +2425,8 @@ class GigaGAN(nn.Module):
 
         if should_log:
             wandb.log({
-                "discim_images": [wandb.Image(image) for image in images],
-                "discim_real_images": [wandb.Image(image) for image in real_images],
+                "discrim_images": [wandb.Image(image) for image in images],
+                "discrim_real_images": [wandb.Image(image) for image in real_images],
                 # rgb
                 "discrim_rgbs": [wandb.Image(rgb) for rgb in rgbs],
             })
@@ -2393,6 +2447,7 @@ class GigaGAN(nn.Module):
         grad_accum_every = 1,
         calc_multiscale_loss = True,
         should_log = False,
+        should_plot_grad_flow = False
     ):
         total_divergence = 0.
         total_multiscale_divergence = 0. if calc_multiscale_loss else None
@@ -2481,6 +2536,8 @@ class GigaGAN(nn.Module):
                     total_loss = total_loss + vd_loss * self.vision_aided_divergence_loss_weight
 
             self.accelerator.backward(total_loss / grad_accum_every, retain_graph = self.need_contrastive_loss)
+            if should_log and should_plot_grad_flow:
+                plot_grad_flow(self.G.named_parameters(), "gigagan-results/gen_grad_flow")
 
         # if needs the generator contrastive loss
         # gather up all images and texts and calculate it
@@ -2602,7 +2659,8 @@ class GigaGAN(nn.Module):
                 grad_accum_every = grad_accum_every,
                 apply_gradient_penalty = apply_gradient_penalty,
                 calc_multiscale_loss = calc_multiscale_loss,
-                should_log = should_log
+                should_log = should_log,
+                should_plot_grad_flow = self.should_plot_grad_flow
             )
 
             self.accelerator.wait_for_everyone()
@@ -2617,7 +2675,8 @@ class GigaGAN(nn.Module):
                 batch_size = batch_size,
                 grad_accum_every = grad_accum_every,
                 calc_multiscale_loss = calc_multiscale_loss,
-                should_log = should_log
+                should_log = should_log,
+                should_plot_grad_flow = self.should_plot_grad_flow
             )
 
             if exists(gp_loss):
@@ -2630,39 +2689,37 @@ class GigaGAN(nn.Module):
                 last_multiscale_g_loss = multiscale_g_loss
 
             if should_log:
-                pass
+                losses = (
+                    ('G', g_loss),
+                    ('MSG', last_multiscale_g_loss),
+                    ('VG', vision_aided_g_loss),
+                    ('D', d_loss),
+                    ('MSD', last_multiscale_d_loss),
+                    ('VD', vision_aided_d_loss),
+                    ('GP', last_gp_loss),
+                    ('SSL', recon_loss),
+                    ('CL', contrastive_loss),
+                    ('MAL', matching_aware_loss)
+                )
 
-            losses = (
-                ('G', g_loss),
-                ('MSG', last_multiscale_g_loss),
-                ('VG', vision_aided_g_loss),
-                ('D', d_loss),
-                ('MSD', last_multiscale_d_loss),
-                ('VD', vision_aided_d_loss),
-                ('GP', last_gp_loss),
-                ('SSL', recon_loss),
-                ('CL', contrastive_loss),
-                ('MAL', matching_aware_loss)
-            )
+                losses_str = ' | '.join([f'{loss_name}: {loss:.2f}' for loss_name, loss in losses])
 
-            losses_str = ' | '.join([f'{loss_name}: {loss:.2f}' for loss_name, loss in losses])
+                self.print(losses_str)
 
-            self.print(losses_str)
+                log_dict = {
+                    "G": g_loss,
+                    "MSG": last_multiscale_g_loss,
+                    'VG': vision_aided_g_loss,
+                    "D": d_loss,
+                    "MSD": last_multiscale_d_loss,
+                    'VD': vision_aided_d_loss,
+                    "GP": last_gp_loss,
+                    "SSL": recon_loss,
+                    'CL': contrastive_loss,
+                    'MAL': matching_aware_loss
+                }
 
-            log_dict = {
-                "G": g_loss,
-                "MSG": last_multiscale_g_loss,
-                'VG': vision_aided_g_loss,
-                "D": d_loss,
-                "MSD": last_multiscale_d_loss,
-                'VD': vision_aided_d_loss,
-                "GP": last_gp_loss,
-                "SSL": recon_loss,
-                'CL': contrastive_loss,
-                'MAL': matching_aware_loss
-            }
-
-            wandb.log(log_dict)
+                wandb.log(log_dict)
 
             self.accelerator.wait_for_everyone()
 

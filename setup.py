@@ -29,7 +29,9 @@ setup(
     'torch>=1.6',
     'torchvision',
     'tqdm',
-    'wandb'
+    'wandb',
+    'matplotlib',
+    'plotly'
   ],
   classifiers=[
     'Development Status :: 4 - Beta',
